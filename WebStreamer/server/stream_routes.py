@@ -44,7 +44,8 @@ async def watch_handler(request: web.Request):
     except FIleNotFound as e:
         raise web.HTTPNotFound(text=e.message)
     except (AttributeError, BadStatusLine, ConnectionResetError):
-        pass
+        # Added a return statement here to prevent the function from returning None
+        return web.Response(status=500, text="Internal Server Error")
     except Exception as e:
         logging.critical(e)
         logging.debug(traceback.format_exc())
@@ -61,7 +62,8 @@ async def download_handler(request: web.Request):
     except FIleNotFound as e:
         raise web.HTTPNotFound(text=e.message)
     except (AttributeError, BadStatusLine, ConnectionResetError):
-        pass
+        # Added a return statement here to prevent the function from returning None
+        return web.Response(status=500, text="Internal Server Error")
     except Exception as e:
         logging.critical(e)
         logging.debug(traceback.format_exc())
@@ -78,7 +80,8 @@ async def stream_handler(request: web.Request):
     except FIleNotFound as e:
         raise web.HTTPNotFound(text=e.message)
     except (AttributeError, BadStatusLine, ConnectionResetError):
-        pass
+        # Added a return statement here to prevent the function from returning None
+        return web.Response(status=500, text="Internal Server Error")
     except Exception as e:
         logging.critical(e)
         logging.debug(traceback.format_exc())
