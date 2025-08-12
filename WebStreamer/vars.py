@@ -23,7 +23,7 @@ class Var(object):
     NO_PORT = str(environ.get("NO_PORT", "0").lower()) in ("1", "true", "t", "yes", "y")
     FQDN = str(environ.get("FQDN", BIND_ADDRESS))
     URL = "http{}://{}{}/".format(
-            "s" if HAS_SSL else "", FQDN, "https://teenage-guenna-school1660440-4a8e215c.koyeb.app" if NO_PORT else ":" + str(PORT)
+            "s" if HAS_SSL else "", FQDN, "" if NO_PORT else ":" + str(PORT)
         )
 
     DATABASE_URL = str(environ.get('DATABASE_URL'))
