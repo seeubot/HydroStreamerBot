@@ -91,60 +91,67 @@ class_cache = {}
 
 async def media_streamer(request: web.Request, db_id: str):
     """Stream media file."""
+    try:
+        range_header = request.headers.get("Range")
+        client_index = min(work_loads, key=work_loads.get)
+        fastest_client = multi_clients[client_index]
 
-    range_header = request.headers.get("Range")
-    client_index = min(work_loads, key=work_loads.get)
-    fastest_client = multi_clients[client_index]
+        if Var.MULTI_CLIENT:
+            logging.info(f"Client {client_index} is now serving {request.headers.get('X-FORWARDED-FOR', request.remote)}")
 
-    if Var.MULTI_CLIENT:
-        logging.info(f"Client {client_index} is now serving {request.headers.get('X-FORWARDED-FOR', request.remote)}")
+        if fastest_client in class_cache:
+            tg_connect = class_cache[fastest_client]
+            logging.debug(f"Using cached ByteStreamer object for client {client_index}")
+        else:
+            logging.debug(f"Creating new ByteStreamer object for client {client_index}")
+            tg_connect = utils.ByteStreamer(fastest_client)
+            class_cache[fastest_client] = tg_connect
 
-    if fastest_client in class_cache:
-        tg_connect = class_cache[fastest_client]
-        logging.debug(f"Using cached ByteStreamer object for client {client_index}")
-    else:
-        logging.debug(f"Creating new ByteStreamer object for client {client_index}")
-        tg_connect = utils.ByteStreamer(fastest_client)
-        class_cache[fastest_client] = tg_connect
+        logging.debug("before calling get_file_properties")
+        file_id = await tg_connect.get_file_properties(db_id, multi_clients)
+        logging.debug("after calling get_file_properties")
 
-    logging.debug("before calling get_file_properties")
-    file_id = await tg_connect.get_file_properties(db_id, multi_clients)
-    logging.debug("after calling get_file_properties")
+        file_size = file_id.file_size
+        from_bytes, until_bytes = parse_range_header(range_header, file_size)
 
-    file_size = file_id.file_size
-    from_bytes, until_bytes = parse_range_header(range_header, file_size)
+        if (until_bytes >= file_size) or (from_bytes < 0) or (until_bytes < from_bytes):
+            return web.Response(
+                status=416,
+                body="416: Range not satisfiable",
+                headers={"Content-Range": f"bytes */{file_size}"},
+            )
 
-    if (until_bytes >= file_size) or (from_bytes < 0) or (until_bytes < from_bytes):
+        chunk_size = 1024 * 1024
+        until_bytes = min(until_bytes, file_size - 1)
+        offset = from_bytes - (from_bytes % chunk_size)
+        first_part_cut = from_bytes - offset
+        last_part_cut = until_bytes % chunk_size + 1
+        req_length = until_bytes - from_bytes + 1
+        part_count = math.ceil((until_bytes + 1) / chunk_size) - math.floor(offset / chunk_size)
+        
+        body = tg_connect.yield_file(file_id, client_index, offset, first_part_cut, last_part_cut, part_count, chunk_size)
+
+        mime_type = file_id.mime_type or mimetypes.guess_type(utils.get_name(file_id))[0] or "application/octet-stream"
+        disposition = "attachment" if "application/" in mime_type or "text/" in mime_type else "inline"
+
         return web.Response(
-            status=416,
-            body="416: Range not satisfiable",
-            headers={"Content-Range": f"bytes */{file_size}"},
+            status=206 if range_header else 200,
+            body=body,
+            headers={
+                "Content-Type": mime_type,
+                "Content-Range": f"bytes {from_bytes}-{until_bytes}/{file_size}",
+                "Content-Length": str(req_length),
+                "Content-Disposition": f'{disposition}; filename="{utils.get_name(file_id)}"',
+                "Accept-Ranges": "bytes",
+            },
         )
+    except Exception as e:
+        # Log the full traceback for debugging purposes
+        traceback.print_exc()
+        logging.critical(f"An unhandled exception occurred in media_streamer: {e}")
+        # Return a generic 500 error response
+        return web.Response(status=500, text="Internal Server Error")
 
-    chunk_size = 1024 * 1024
-    until_bytes = min(until_bytes, file_size - 1)
-    offset = from_bytes - (from_bytes % chunk_size)
-    first_part_cut = from_bytes - offset
-    last_part_cut = until_bytes % chunk_size + 1
-    req_length = until_bytes - from_bytes + 1
-    part_count = math.ceil((until_bytes + 1) / chunk_size) - math.floor(offset / chunk_size)
-    
-    body = tg_connect.yield_file(file_id, client_index, offset, first_part_cut, last_part_cut, part_count, chunk_size)
-
-    mime_type = file_id.mime_type or mimetypes.guess_type(utils.get_name(file_id))[0] or "application/octet-stream"
-    disposition = "attachment" if "application/" in mime_type or "text/" in mime_type else "inline"
-
-    return web.Response(
-        status=206 if range_header else 200,
-        body=body,
-        headers={
-            "Content-Type": mime_type,
-            "Content-Range": f"bytes {from_bytes}-{until_bytes}/{file_size}",
-            "Content-Length": str(req_length),
-            "Content-Disposition": f'{disposition}; filename="{utils.get_name(file_id)}"',
-            "Accept-Ranges": "bytes",
-        },
-    )
 
 def parse_range_header(header, file_size):
     """Parse Range header and return tuple of (from_bytes, until_bytes)."""
