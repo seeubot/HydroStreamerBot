@@ -1,4 +1,5 @@
 <!-- Code by fyaz05 -->
+<!-- Modified for HLS streaming by Gemini -->
 
 <!DOCTYPE html>
 <html lang="en">
@@ -13,6 +14,7 @@
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700&family=Roboto:wght@300;400;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/fyaz05/Resources@main/HydroStreamerBot/reqStyles.css">
+</head>
 <body>
     <div class="container">
         <header>
@@ -20,8 +22,8 @@
         </header>
         <div class="player-container">
             <div class="video-wrapper">
+                <!-- No source tag is needed here, hls.js will handle it -->
                 <video class="plyr" controls poster="https://cdn.jsdelivr.net/gh/fyaz05/Resources@main/HydroStreamerBot/videobg.jpg" alt="Video Player Poster Image">
-                    <source src="%s" type="video/mp4" alt="Video Source">
                     Your browser does not support the video tag.
                 </video>
             </div>
@@ -69,25 +71,48 @@
     </footer>
 
     <script src="https://cdn.plyr.io/3.7.8/plyr.js"></script>
+    <!-- Add hls.js library for HLS playback -->
+    <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
     <script>
         document.addEventListener('DOMContentLoaded', () => {
             const videoElement = document.querySelector('.plyr');
-            new Plyr(videoElement);
+            const currentUrl = window.location.href;
+
+            // Use the new HLS URL for streaming
+            const hlsUrl = currentUrl.replace("/watch/", "/hls/") + "/manifest.m3u8";
+
+            if (Hls.isSupported()) {
+                const hls = new Hls();
+                hls.loadSource(hlsUrl);
+                hls.attachMedia(videoElement);
+                hls.on(Hls.Events.MANIFEST_PARSED, () => {
+                    new Plyr(videoElement);
+                });
+            } else if (videoElement.canPlayType('application/vnd.apple.mpegurl')) {
+                // For native HLS support on Safari/iOS
+                videoElement.src = hlsUrl;
+                new Plyr(videoElement);
+            } else {
+                // Fallback for unsupported browsers
+                new Plyr(videoElement);
+                videoElement.src = currentUrl.replace("/watch/", "/dl/");
+            }
         });
 
-        const currentUrl = window.location.href;
-        const finalUrl = currentUrl.replace("/watch/", "/dl/");
+        // The download link should still use the direct download URL
+        const finalUrl = window.location.href.replace("/watch/", "/dl/");
+        const hlsUrl = window.location.href.replace("/watch/", "/hls/") + "/manifest.m3u8";
 
         function playOnline(player) {
             const playerUrls = {
-                vlc: `vlc://${finalUrl}`,
-                mxp: `intent:${finalUrl}#Intent;package=com.mxtech.videoplayer.pro;end`,
-                mx: `intent:${finalUrl}#Intent;package=com.mxtech.videoplayer.ad;end`,
-                np: `nplayer-${finalUrl}`,
-                sp: `intent:${finalUrl}#Intent;action=com.young.simple.player.playback_online;package=com.young.simple.player;end`,
-                km: `intent:${finalUrl}#Intent;package=com.kmplayer;end`
+                vlc: `vlc://${hlsUrl}`,
+                mxp: `intent:${hlsUrl}#Intent;package=com.mxtech.videoplayer.pro;end`,
+                mx: `intent:${hlsUrl}#Intent;package=com.mxtech.videoplayer.ad;end`,
+                np: `nplayer-${hlsUrl}`,
+                sp: `intent:${hlsUrl}#Intent;action=com.young.simple.player.playback_online;package=com.young.simple.player;end`,
+                km: `intent:${hlsUrl}#Intent;package=com.kmplayer;end`
             };
-            window.location.href = playerUrls[player] || finalUrl;
+            window.location.href = playerUrls[player] || hlsUrl;
         }
 
         function download() {
@@ -95,7 +120,7 @@
         }
 
         function copyLink() {
-            navigator.clipboard.writeText(finalUrl)
+            navigator.clipboard.writeText(window.location.href)
                 .then(() => {
                     const feedback = document.createElement('div');
                     feedback.className = 'feedback';
@@ -109,3 +134,4 @@
     </script>
 </body>
 </html>
+
