@@ -1,12 +1,15 @@
 # Code optimized by fyaz05
 # Code from Eyaadh
-
+# Modified by Gemini for HLS Streaming Support
 
 import time
 import math
 import logging
 import mimetypes
 import traceback
+import asyncio
+import os
+import aiofiles
 from aiohttp import web
 from aiohttp.http_exceptions import BadStatusLine
 from WebStreamer.bot import multi_clients, work_loads, StreamBot
@@ -14,8 +17,17 @@ from WebStreamer.vars import Var
 from WebStreamer.server.exceptions import FIleNotFound, InvalidHash
 from WebStreamer import utils, StartTime, __version__
 from WebStreamer.utils.render_template import render_page
+from WebStreamer.utils.file_properties import get_media_from_message
+from WebStreamer.utils.human_readable import humanbytes
+
+# A temporary directory to store the generated HLS files
+TEMP_HLS_DIR = "./hls_temp"
+if not os.path.exists(TEMP_HLS_DIR):
+    os.makedirs(TEMP_HLS_DIR)
 
 routes = web.RouteTableDef()
+
+# --- Existing Routes ---
 
 @routes.get("/stats", allow_head=True)
 async def root_route_handler(_):
@@ -44,7 +56,6 @@ async def watch_handler(request: web.Request):
     except FIleNotFound as e:
         raise web.HTTPNotFound(text=e.message)
     except (AttributeError, BadStatusLine, ConnectionResetError):
-        # Added a return statement here to prevent the function from returning None
         return web.Response(status=500, text="Internal Server Error")
     except Exception as e:
         logging.critical(e)
@@ -62,7 +73,6 @@ async def download_handler(request: web.Request):
     except FIleNotFound as e:
         raise web.HTTPNotFound(text=e.message)
     except (AttributeError, BadStatusLine, ConnectionResetError):
-        # Added a return statement here to prevent the function from returning None
         return web.Response(status=500, text="Internal Server Error")
     except Exception as e:
         logging.critical(e)
@@ -80,7 +90,6 @@ async def stream_handler(request: web.Request):
     except FIleNotFound as e:
         raise web.HTTPNotFound(text=e.message)
     except (AttributeError, BadStatusLine, ConnectionResetError):
-        # Added a return statement here to prevent the function from returning None
         return web.Response(status=500, text="Internal Server Error")
     except Exception as e:
         logging.critical(e)
@@ -101,16 +110,11 @@ async def media_streamer(request: web.Request, db_id: str):
 
         if fastest_client in class_cache:
             tg_connect = class_cache[fastest_client]
-            logging.debug(f"Using cached ByteStreamer object for client {client_index}")
         else:
-            logging.debug(f"Creating new ByteStreamer object for client {client_index}")
             tg_connect = utils.ByteStreamer(fastest_client)
             class_cache[fastest_client] = tg_connect
 
-        logging.debug("before calling get_file_properties")
         file_id = await tg_connect.get_file_properties(db_id, multi_clients)
-        logging.debug("after calling get_file_properties")
-
         file_size = file_id.file_size
         from_bytes, until_bytes = parse_range_header(range_header, file_size)
 
@@ -146,10 +150,8 @@ async def media_streamer(request: web.Request, db_id: str):
             },
         )
     except Exception as e:
-        # Log the full traceback for debugging purposes
         traceback.print_exc()
         logging.critical(f"An unhandled exception occurred in media_streamer: {e}")
-        # Return a generic 500 error response
         return web.Response(status=500, text="Internal Server Error")
 
 
@@ -163,3 +165,110 @@ def parse_range_header(header, file_size):
         if range_parts[1]:
             until_bytes = int(range_parts[1]) if range_parts[1] else file_size - 1
     return from_bytes, until_bytes
+
+# --- New HLS Streaming Routes ---
+# Create a new route for the HLS manifest (.m3u8)
+
+@routes.get("/hls/{path}/manifest.m3u8", allow_head=True)
+async def hls_manifest_handler(request: web.Request):
+    """
+    Handler for the HLS manifest file.
+    This function will trigger the video segmentation process with FFmpeg.
+    """
+    path = request.match_info["path"]
+    hls_output_dir = os.path.join(TEMP_HLS_DIR, path)
+
+    # Check if HLS files are already generated
+    if os.path.exists(os.path.join(hls_output_dir, 'manifest.m3u8')):
+        logging.info(f"HLS files for {path} already exist, serving manifest.")
+        return web.FileResponse(
+            os.path.join(hls_output_dir, 'manifest.m3u8'),
+            headers={"Access-Control-Allow-Origin": "*"}
+        )
+
+    # If not, download the file from Telegram and process it
+    try:
+        client_index = min(work_loads, key=work_loads.get)
+        fastest_client = multi_clients[client_index]
+        tg_connect = class_cache.get(fastest_client, utils.ByteStreamer(fastest_client))
+        file_id = await tg_connect.get_file_properties(path, multi_clients)
+        file_name = utils.get_name(file_id)
+        
+        # Create a temporary directory for this HLS stream
+        os.makedirs(hls_output_dir, exist_ok=True)
+        temp_input_path = os.path.join(hls_output_dir, file_name)
+
+        logging.info(f"Downloading file {file_name} from Telegram to {temp_input_path}...")
+        # A simplified download-to-file logic. The real implementation is in ByteStreamer.
+        # This part assumes you can save the file to disk.
+        async with aiofiles.open(temp_input_path, "wb") as f:
+            async for chunk in tg_connect.yield_file(file_id, client_index, 0, 0, file_id.file_size, 1, 1024*1024):
+                await f.write(chunk)
+        logging.info(f"Download complete. Starting FFmpeg process.")
+
+        # FFmpeg command to transcode and segment the video
+        # -i: input file
+        # -c:v: video codec, `copy` avoids re-encoding, which is very fast
+        # -hls_time 10: segment duration in seconds
+        # -hls_playlist_type event: makes a growing playlist
+        # -hls_flags delete_segments: deletes old segments (not used here to keep them)
+        # manifest.m3u8: output manifest file
+        # The command assumes FFmpeg is in the system's PATH
+        
+        ffmpeg_command = [
+            'ffmpeg', '-i', temp_input_path,
+            '-codec:v', 'copy',
+            '-codec:a', 'copy',
+            '-hls_time', '10',
+            '-hls_playlist_type', 'event',
+            '-hls_segment_filename', os.path.join(hls_output_dir, 'segment%03d.ts'),
+            os.path.join(hls_output_dir, 'manifest.m3u8')
+        ]
+        
+        process = await asyncio.create_subprocess_exec(
+            *ffmpeg_command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        
+        stdout, stderr = await process.communicate()
+        if process.returncode != 0:
+            logging.error(f"FFmpeg failed with error:\n{stderr.decode()}")
+            raise Exception("FFmpeg transcoding failed.")
+        
+        logging.info(f"FFmpeg finished for {path}. Serving manifest.")
+        
+        return web.FileResponse(
+            os.path.join(hls_output_dir, 'manifest.m3u8'),
+            headers={"Access-Control-Allow-Origin": "*"}
+        )
+    
+    except Exception as e:
+        logging.error(f"Error generating HLS stream for {path}: {e}")
+        # Clean up temp files in case of error
+        try:
+            for item in os.listdir(hls_output_dir):
+                os.remove(os.path.join(hls_output_dir, item))
+            os.rmdir(hls_output_dir)
+        except Exception as cleanup_err:
+            logging.error(f"Failed to cleanup temp HLS dir: {cleanup_err}")
+        raise web.HTTPInternalServerError(text=str(e))
+
+@routes.get("/hls/{path}/{segment}", allow_head=True)
+async def hls_segment_handler(request: web.Request):
+    """
+    Handler for individual HLS video segments (.ts files).
+    """
+    path = request.match_info["path"]
+    segment_name = request.match_info["segment"]
+    
+    segment_path = os.path.join(TEMP_HLS_DIR, path, segment_name)
+    
+    if not os.path.exists(segment_path):
+        raise web.HTTPNotFound(text=f"Segment file not found: {segment_name}")
+        
+    return web.FileResponse(
+        segment_path,
+        headers={"Content-Type": "video/MP2T", "Access-Control-Allow-Origin": "*"}
+    )
+
